@@ -81,6 +81,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .hidden{display:none!important}
 footer{text-align:center;color:var(--muted);font-size:12px;padding:6px 16px 24px}
 footer a{color:inherit}
+footer .ver{color:var(--ink);font-weight:600}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:9px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}
 .toast.show{opacity:1}
 @media (max-width:860px){
@@ -149,7 +150,7 @@ footer a{color:inherit}
     <div class="queue" id="queue"></div>
   </section>
 </main>
-<footer>Runs entirely in your browser — images are never uploaded. Tracing by <a href="https://github.com/jankovicsandras/imagetracerjs">imagetracerjs</a> (public domain).</footer>
+<footer><b class="ver">Version 2.0</b> · Runs entirely in your browser — images are never uploaded. Tracing by <a href="https://github.com/jankovicsandras/imagetracerjs">imagetracerjs</a> (public domain).</footer>
 <div class="toast" id="toast"></div>
 
 <script id="tracerLib">/*
