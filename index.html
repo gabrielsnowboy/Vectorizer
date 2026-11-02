@@ -54,7 +54,9 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .drop span{color:var(--muted);font-size:14px}
 .toolbar button{padding:7px 11px;font-size:14px}
 .toolbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
-.toolbar .stats{color:var(--muted);font-size:13px;margin-right:auto}
+.toolbar .stats{color:var(--muted);font-size:13px;margin-right:auto;display:flex;flex-wrap:wrap;gap:2px 10px;align-items:baseline}
+.toolbar .stats b{color:var(--ink);font-weight:600}
+.toolbar .stats .warn{color:var(--accent);font-size:12px;flex-basis:100%}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
 .seg button{border:0;border-radius:0;padding:7px 12px}
 .seg button.on{background:var(--ink);color:var(--bg)}
@@ -142,7 +144,7 @@ footer a{color:inherit}
 
     <div class="views hidden" id="views">
       <div class="pane" id="origPane"><span class="tag">Original</span><div class="board"><img id="origImg" alt="Original image"></div></div>
-      <div class="pane"><span class="tag">Vector</span><div class="board" id="vecBoard"></div><div class="busy" id="busy"><div class="spin"></div>Tracing…</div></div>
+      <div class="pane"><span class="tag">Vector</span><div class="board" id="vecBoard"></div><div class="busy" id="busy"><div class="spin"></div><span id="busyText">Tracing…</span></div></div>
     </div>
     <div class="queue" id="queue"></div>
   </section>
@@ -1421,8 +1423,8 @@ function tracerOptions(){
   const d = S.detail / 100, c = S.curves / 100;
   return {
     numberofcolors: S.colors,
-    colorsampling: S.colors <= 2 ? 0 : 2,
-    colorquantcycles: 3,
+    smartPalette: true,        // perceptual palette, see buildPalette()
+    colorquantcycles: 1,
     mincolorratio: 0,
     pathomit: Math.round(16 * (1 - d) * (1 - d)),   // 16 → 0 specks dropped
     ltres: S.pixel ? 0.01 : 0.1 + c * 2.4,           // line error tolerance
@@ -1439,10 +1441,92 @@ function tracerOptions(){
    Preferred: a background worker, so the page never freezes.
    Some hosts (embedded previews, strict security policies) forbid workers;
    then we trace on the page itself, one job at a time, and keep going. */
-const workerSrc = $('tracerLib').textContent + `
+
+/* Pick the palette ourselves: k-means++ in OKLab (a perceptual color space).
+   The library's own sampler takes an even grid of pixels, so a mostly dark
+   image spends nearly every color on shades of black and small vivid areas
+   (hair, skin, glows) get flattened to grey. k-means++ deliberately seeds
+   colors far from the ones already chosen, so distinct hues get a slot. */
+function buildPalette(px, k){
+  const n = px.length >> 2;
+  let transp = 0;
+  for (let i = 3; i < px.length; i += 4) if (px[i] < 128) transp++;
+  const addTransparent = transp / n > 0.002;
+  const K = Math.max(1, k - (addTransparent ? 1 : 0));
+  const opaque = n - transp;
+  if (!opaque) return [{r:0,g:0,b:0,a:0}];
+
+  let seed = 1234567;                       // deterministic: same image, same result
+  const rnd = () => (seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296;
+
+  // sample up to 50k opaque pixels
+  const MAX = 50000, step = Math.max(1, opaque / MAX);
+  const lin = new Float32Array(256);
+  for (let i = 0; i < 256; i++) { const c = i / 255; lin[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+  const L = [], A = [], B = [], R = [], G = [], Bl = [];
+  let next = rnd() * step, seen = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    if (px[i+3] < 128) continue;
+    if (seen++ < next) continue;
+    next += step;
+    const r = lin[px[i]], g = lin[px[i+1]], b = lin[px[i+2]];
+    const l = Math.cbrt(0.4122214708*r + 0.5363325363*g + 0.0514459929*b);
+    const m = Math.cbrt(0.2119034982*r + 0.6806995451*g + 0.1073969566*b);
+    const s = Math.cbrt(0.0883024619*r + 0.2817188376*g + 0.6299787005*b);
+    L.push(0.2104542553*l + 0.7936177850*m - 0.0040720468*s);
+    A.push(1.4*(1.9779984951*l - 2.4285922050*m + 0.4505937099*s));   // chroma weighted a bit higher
+    B.push(1.4*(0.0259040371*l + 0.7827717662*m - 0.8086757660*s));
+    R.push(px[i]); G.push(px[i+1]); Bl.push(px[i+2]);
+  }
+  const N = L.length, k2 = Math.min(K, N);
+  const cL = [], cA = [], cB = [];
+  const D = new Float64Array(N).fill(Infinity);
+  let pick = Math.floor(rnd() * N);
+  for (let c = 0; c < k2; c++) {
+    cL.push(L[pick]); cA.push(A[pick]); cB.push(B[pick]);
+    let sum = 0;
+    for (let i = 0; i < N; i++) {
+      const dl = L[i]-cL[c], da = A[i]-cA[c], db = B[i]-cB[c], d = dl*dl + da*da + db*db;
+      if (d < D[i]) D[i] = d; sum += D[i];
+    }
+    if (sum === 0) break;                    // fewer distinct colors than requested
+    let t = rnd() * sum; pick = N - 1;
+    for (let i = 0; i < N; i++) { t -= D[i]; if (t <= 0) { pick = i; break; } }
+  }
+  const C = cL.length, assign = new Int32Array(N);
+  let sr, sg, sb, cnt;
+  for (let iter = 0; iter < 12; iter++) {
+    const sL = new Float64Array(C), sA = new Float64Array(C), sB = new Float64Array(C);
+    sr = new Float64Array(C); sg = new Float64Array(C); sb = new Float64Array(C); cnt = new Float64Array(C);
+    let moved = 0;
+    for (let i = 0; i < N; i++) {
+      let best = 0, bd = Infinity;
+      for (let c = 0; c < C; c++) {
+        const dl = L[i]-cL[c], da = A[i]-cA[c], db = B[i]-cB[c], d = dl*dl + da*da + db*db;
+        if (d < bd) { bd = d; best = c; }
+      }
+      if (assign[i] !== best) { moved++; assign[i] = best; }
+      sL[best] += L[i]; sA[best] += A[i]; sB[best] += B[i];
+      sr[best] += R[i]; sg[best] += G[i]; sb[best] += Bl[i]; cnt[best]++;
+    }
+    for (let c = 0; c < C; c++) if (cnt[c]) { cL[c] = sL[c]/cnt[c]; cA[c] = sA[c]/cnt[c]; cB[c] = sB[c]/cnt[c]; }
+    if (iter > 0 && moved < N * 0.001) break;
+  }
+  // most-used color first: it is drawn first and doubles as the background
+  const order = [...Array(C).keys()].filter(c => cnt[c]).sort((x, y) => cnt[y] - cnt[x]);
+  const pal = order.map(c => ({r: Math.round(sr[c]/cnt[c]), g: Math.round(sg[c]/cnt[c]), b: Math.round(sb[c]/cnt[c]), a: 255}));
+  if (addTransparent) pal.push({r:0, g:0, b:0, a:0});
+  return pal;
+}
+function runTrace(imgd, opts){
+  if (opts.smartPalette && !opts.pal) { opts.pal = buildPalette(imgd.data, opts.numberofcolors); opts.colorquantcycles = 1; }
+  return ImageTracer.imagedataToSVG(imgd, opts);
+}
+
+const workerSrc = $('tracerLib').textContent + '\n' + buildPalette.toString() + '\n' + runTrace.toString() + `
 self.onmessage = e => {
   const {id, imgd, opts} = e.data;
-  try { self.postMessage({id, svg: ImageTracer.imagedataToSVG(imgd, opts)}); }
+  try { self.postMessage({id, svg: runTrace(imgd, opts)}); }
   catch(err){ self.postMessage({id, error: String(err)}); }
 };`;
 let workerUrl = null, worker = null, useWorker = true, jobSeq = 0;
@@ -1479,7 +1563,7 @@ async function runMainQueue(){
     await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));  // let the spinner paint
     if (!pending.has(id)) continue;
     let data;
-    try { data = {id, svg: ImageTracer.imagedataToSVG(job.imgd, job.opts)}; }
+    try { data = {id, svg: runTrace(job.imgd, job.opts)}; }
     catch(err){ data = {id, error: String(err)}; }
     finish(id, data);
   }
@@ -1534,24 +1618,54 @@ function pixels(it){
   cx.imageSmoothingEnabled = !S.pixel;
   cx.drawImage(it.img, 0, 0, tw, th);
   const d = cx.getImageData(0, 0, tw, th);
-  if (S.removeBg) {
-    const p = d.data;
-    for (let i = 0; i < p.length; i += 4) if (p[i] > 235 && p[i+1] > 235 && p[i+2] > 235) p[i+3] = 0;
-  }
+  const p = d.data;
+  if (S.removeBg) for (let i = 0; i < p.length; i += 4) if (p[i] > 235 && p[i+1] > 235 && p[i+2] > 235) p[i+3] = 0;
+  it.hasAlpha = false;
+  for (let i = 3; i < p.length; i += 4) if (p[i] < 250) { it.hasAlpha = true; break; }
   return d;
 }
 
+/* Rewrite the tracer output into a much smaller SVG:
+   - one <path> per color instead of one per shape (same picture: shapes of a
+     color never overlap, and holes keep their opposite winding)
+   - hex colors, no repeated attributes, no opacity="1"
+   - tight path data ("M1 2Q3 4" instead of "M 1 2 Q 3 4 ")
+   - invisible (fully transparent) shapes dropped
+   Also scales the drawing back up to the original pixel size. */
+const hex = n => n.toString(16).padStart(2, '0');
 function cleanSVG(svg, it){
-  // drop invisible paths, scale back up to the original pixel size
-  svg = svg.replace(/<path[^>]*opacity="0"[^>]*\/>/g, '');
   const vb = (svg.match(/viewBox="([^"]+)"/) || [])[1] || `0 0 ${it.w} ${it.h}`;
-  return svg.replace(/<svg[^>]*>/, `<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="${it.w}" height="${it.h}" viewBox="${vb}">`);
+  const re = /<path fill="rgb\((\d+),(\d+),(\d+)\)" stroke="[^"]*" stroke-width="([\d.]+)" opacity="([\d.]+)" d="([^"]*)"\s*\/>/g;
+  const groups = []; let last = null, shapes = 0, m;
+  while ((m = re.exec(svg))) {
+    const op = +m[5]; if (op === 0) continue;
+    const col = '#' + hex(+m[1]) + hex(+m[2]) + hex(+m[3]);
+    const key = col + '|' + m[4] + '|' + op;
+    if (!last || last.key !== key) { last = {key, col, sw: +m[4], op, d: []}; groups.push(last); }
+    last.d.push(m[6].trim().replace(/\s*([MLQZ])\s*/g, '$1'));
+    shapes++;
+  }
+  let body = '';
+  // Opaque images: fill the canvas with the main color so hairline gaps between
+  // neighbouring shapes (and dropped specks) don't show through as dark seams.
+  if (!it.hasAlpha && groups.length && groups[0].op === 1) {
+    const [, , vw, vh] = vb.split(/[\s,]+/);
+    body += `<rect width="${vw}" height="${vh}" fill="${groups[0].col}"/>`;
+  }
+  for (const g of groups) {
+    body += `<path fill="${g.col}"` + (g.sw ? ` stroke="${g.col}" stroke-width="${g.sw}"` : '') +
+            (g.op < 1 ? ` opacity="${+g.op.toFixed(3)}"` : '') + ` d="${g.d.join('')}"/>`;
+  }
+  it.shapes = shapes;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${it.w}" height="${it.h}" viewBox="${vb}">${body}</svg>`;
 }
 
 async function traceItem(it){
   it.svg = null; it.tracing = true; renderQueue();
   if (it === current) showBusy(true);
+  const t0 = performance.now();
   const r = await trace(pixels(it), tracerOptions());
+  it.ms = performance.now() - t0;
   if (r.cancelled) return;
   it.tracing = false;
   if (r.error) { toast('Tracing failed: ' + r.error); if (it === current) showBusy(false); return; }
@@ -1576,14 +1690,28 @@ function select(it){
   if (it.svg) showCurrent(); else if (!it.tracing) traceItem(it); else showBusy(true);
 }
 
-function showBusy(on){ $('busy').classList.toggle('show', on); $('dlBtn').disabled = $('copyBtn').disabled = on; }
+let busyTimer = null;
+function showBusy(on){
+  $('busy').classList.toggle('show', on); $('dlBtn').disabled = $('copyBtn').disabled = on;
+  clearInterval(busyTimer); busyTimer = null;
+  if (on) {
+    const t0 = Date.now(), big = current && current.w * current.h > 4e6;
+    const tick = () => {
+      const s = Math.floor((Date.now() - t0) / 1000);
+      $('busyText').textContent = 'Tracing…' + (s >= 2 ? ` ${s}s` : '') + (big && s >= 4 ? ' — large image, hang tight' : '');
+    };
+    tick(); busyTimer = setInterval(tick, 500);
+  }
+}
 
 function showCurrent(){
   const it = current; showBusy(false);
   $('vecBoard').innerHTML = it.svg;
-  const paths = (it.svg.match(/<path/g) || []).length;
   const kb = new Blob([it.svg]).size / 1024;
-  $('stats').textContent = `${it.w}×${it.h} · ${paths.toLocaleString()} shapes · ${kb < 1024 ? kb.toFixed(0) + ' KB' : (kb/1024).toFixed(1) + ' MB'}`;
+  const size = kb < 1 ? '<1 KB' : kb < 1024 ? kb.toFixed(0) + ' KB' : (kb/1024).toFixed(1) + ' MB';
+  const secs = it.ms ? ` · ${(it.ms/1000).toFixed(1)} s` : '';
+  $('stats').innerHTML = `${it.w}×${it.h} · ${(it.shapes||0).toLocaleString()} shapes · <b>${size}</b>${secs}` +
+    (kb > 5120 ? `<span class="warn">Big file: lower Detail or Colors, or raise Blur, to shrink it.</span>` : '');
 }
 
 function renderQueue(){
