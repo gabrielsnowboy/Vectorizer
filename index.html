@@ -65,7 +65,16 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .pane{position:relative;background:var(--panel);display:flex;align-items:center;justify-content:center;padding:16px;min-height:360px;overflow:hidden}
 .pane .tag{position:absolute;top:10px;left:12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);background:var(--panel);padding:2px 6px;border-radius:5px}
 .pane .board{max-width:100%;max-height:62vh;display:flex;background-color:var(--check-a);background-image:linear-gradient(45deg,var(--check-b) 25%,transparent 25%,transparent 75%,var(--check-b) 75%),linear-gradient(45deg,var(--check-b) 25%,transparent 25%,transparent 75%,var(--check-b) 75%);background-size:16px 16px;background-position:0 0,8px 8px}
-.pane img,.pane svg{max-width:100%;max-height:62vh;width:auto;height:auto;display:block}
+.pane img,.pane svg{max-width:100%;max-height:62vh;width:auto;height:auto;display:block;transform-origin:0 0}
+.pane .board{position:relative;overflow:hidden;touch-action:none}
+.views.zoomed .board{cursor:grab}
+.views.zoomed .board.drag{cursor:grabbing}
+.pane .tag{z-index:2}
+.busy{z-index:3}
+.zoomctl{z-index:2;position:absolute;right:12px;bottom:12px;display:flex;align-items:center;gap:2px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:3px;box-shadow:0 2px 8px rgba(0,0,0,.15)}
+.zoomctl button{border:0;padding:4px 10px;font-size:15px;line-height:1.2;background:transparent}
+.zoomctl button:hover{background:var(--line)}
+.zoomctl span{min-width:44px;text-align:center;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 .pane .board.zoom{max-height:none;overflow:auto}
 .busy{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:color-mix(in srgb,var(--panel) 70%,transparent);font-weight:600}
 .busy.show{display:flex}
@@ -145,12 +154,13 @@ footer .ver{color:var(--ink);font-weight:600}
 
     <div class="views hidden" id="views">
       <div class="pane" id="origPane"><span class="tag">Original</span><div class="board"><img id="origImg" alt="Original image"></div></div>
-      <div class="pane"><span class="tag">Vector</span><div class="board" id="vecBoard"></div><div class="busy" id="busy"><div class="spin"></div><span id="busyText">Tracing…</span></div></div>
+      <div class="pane"><span class="tag">Vector · scroll to zoom</span><div class="board" id="vecBoard"></div><div class="busy" id="busy"><div class="spin"></div><span id="busyText">Tracing…</span></div>
+        <div class="zoomctl" id="zoomctl"><button data-z="out" aria-label="Zoom out">−</button><span id="zlbl">Fit</span><button data-z="in" aria-label="Zoom in">+</button><button data-z="fit">Fit</button></div></div>
     </div>
     <div class="queue" id="queue"></div>
   </section>
 </main>
-<footer><b class="ver">Version 2.0</b> · Runs entirely in your browser — images are never uploaded. Tracing by <a href="https://github.com/jankovicsandras/imagetracerjs">imagetracerjs</a> (public domain).</footer>
+<footer><b class="ver">Version 2.1</b> · Runs entirely in your browser — images are never uploaded. Tracing by <a href="https://github.com/jankovicsandras/imagetracerjs">imagetracerjs</a> (public domain).</footer>
 <div class="toast" id="toast"></div>
 
 <script id="tracerLib">/*
@@ -1519,9 +1529,48 @@ function buildPalette(px, k){
   if (addTransparent) pal.push({r:0, g:0, b:0, a:0});
   return pal;
 }
+/* Stacked tracing (like Inkscape's "stack scans").
+   The library traces every color as a separate cut-out, so neighbouring edges
+   never line up exactly and the background shows through as thin "web" lines.
+   Here colors are ordered from the background color outwards, and each layer
+   is traced as the union of its own pixels and every layer stacked above it.
+   Layers overlap instead of touching, so any curve error just reveals the
+   neighbouring band's color — no seams, at any Curves setting. */
 function runTrace(imgd, opts){
+  const IT = ImageTracer;
+  opts = IT.checkoptions(opts);
   if (opts.smartPalette && !opts.pal) { opts.pal = buildPalette(imgd.data, opts.numberofcolors); opts.colorquantcycles = 1; }
-  return ImageTracer.imagedataToSVG(imgd, opts);
+  const ii = IT.colorquantization(imgd, opts);          // indexed pixels (with a -1 border)
+  const P = ii.palette, arr = ii.array, ah = arr.length, aw = arr[0].length;
+
+  // order opaque colors: background (most used = palette[0]) first, then by brightness
+  // moving away from it, so stacked shapes stay simple nested blobs
+  const lum = c => 0.2126*c.r + 0.7152*c.g + 0.0722*c.b;
+  const opaque = P.map((c, i) => i).filter(i => P[i].a >= 128);
+  if (!opaque.length) return IT.getsvgstring({layers: [], palette: [], width: aw - 2, height: ah - 2}, opts);
+  const bg = opaque.includes(0) ? 0 : opaque[0];
+  const sorted = opaque.slice().sort((a, b) => lum(P[a]) - lum(P[b]));
+  const darkBg = sorted.indexOf(bg) <= sorted.length / 2;
+  const order = [bg, ...(darkBg ? sorted : sorted.reverse()).filter(i => i !== bg)];
+  const rank = new Int32Array(P.length).fill(-1);
+  order.forEach((ci, r) => rank[ci] = r);
+
+  // per-pixel rank grid; mask rows are rebuilt per layer (1 = in this stack level)
+  const R = [], mask = [];
+  for (let j = 0; j < ah; j++) {
+    const rr = new Int32Array(aw), mr = new Array(aw);
+    for (let i = 0; i < aw; i++) { const v = arr[j][i]; rr[i] = v < 0 ? -1 : rank[v]; mr[i] = -1; }
+    R.push(rr); mask.push(mr);
+  }
+  const layers = [], palette = [];
+  for (let k = 0; k < order.length; k++) {
+    for (let j = 0; j < ah; j++) { const rr = R[j], mr = mask[j]; for (let i = 0; i < aw; i++) mr[i] = rr[i] >= k ? 1 : 0; }
+    const traced = IT.batchtracepaths(
+      IT.internodes(IT.pathscan(IT.layeringstep({array: mask}, 1), opts.pathomit), opts),
+      opts.ltres, opts.qtres);
+    if (traced.length) { layers.push(traced); palette.push(P[order[k]]); }
+  }
+  return IT.getsvgstring({layers, palette, width: aw - 2, height: ah - 2}, opts);
 }
 
 const workerSrc = $('tracerLib').textContent + '\n' + buildPalette.toString() + '\n' + runTrace.toString() + `
@@ -1647,12 +1696,6 @@ function cleanSVG(svg, it){
     shapes++;
   }
   let body = '';
-  // Opaque images: fill the canvas with the main color so hairline gaps between
-  // neighbouring shapes (and dropped specks) don't show through as dark seams.
-  if (!it.hasAlpha && groups.length && groups[0].op === 1) {
-    const [, , vw, vh] = vb.split(/[\s,]+/);
-    body += `<rect width="${vw}" height="${vh}" fill="${groups[0].col}"/>`;
-  }
   for (const g of groups) {
     body += `<path fill="${g.col}"` + (g.sw ? ` stroke="${g.col}" stroke-width="${g.sw}"` : '') +
             (g.op < 1 ? ` opacity="${+g.op.toFixed(3)}"` : '') + ` d="${g.d.join('')}"/>`;
@@ -1686,7 +1729,7 @@ function retraceAll(){
 function select(it){
   current = it;
   $('drop').classList.add('hidden'); $('views').classList.remove('hidden'); $('toolbar').classList.remove('hidden');
-  $('origImg').src = it.url;
+  $('origImg').src = it.url; resetZ();
   renderQueue();
   if (it.svg) showCurrent(); else if (!it.tracing) traceItem(it); else showBusy(true);
 }
@@ -1707,7 +1750,7 @@ function showBusy(on){
 
 function showCurrent(){
   const it = current; showBusy(false);
-  $('vecBoard').innerHTML = it.svg;
+  $('vecBoard').innerHTML = it.svg; applyZ();
   const kb = new Blob([it.svg]).size / 1024;
   const size = kb < 1 ? '<1 KB' : kb < 1024 ? kb.toFixed(0) + ' KB' : (kb/1024).toFixed(1) + ' MB';
   const secs = it.ms ? ` · ${(it.ms/1000).toFixed(1)} s` : '';
@@ -1749,6 +1792,61 @@ document.addEventListener('paste', e => {
   const fs = [...(e.clipboardData?.items || [])].filter(i => i.kind === 'file').map(i => i.getAsFile()).filter(Boolean);
   if (fs.length) addFiles(fs);
 });
+
+/* ---------- synced zoom & pan (both panes move together) ---------- */
+const Z = {s:1, x:0, y:0};
+const boards = () => [...document.querySelectorAll('#views .board')].filter(b => b.offsetWidth);
+const zoomEls = () => [$('origImg'), $('vecBoard').querySelector('svg')].filter(Boolean);
+function clampZ(){
+  const b = boards()[0]; if (!b) return;
+  const el = b.firstElementChild, w = el ? el.offsetWidth : b.offsetWidth, h = el ? el.offsetHeight : b.offsetHeight;
+  Z.s = Math.min(32, Math.max(1, Z.s));
+  if (Z.s === 1) { Z.x = Z.y = 0; return; }
+  Z.x = Math.min(0, Math.max(w * (1 - Z.s), Z.x));
+  Z.y = Math.min(0, Math.max(h * (1 - Z.s), Z.y));
+}
+function applyZ(){
+  clampZ();
+  for (const el of zoomEls()) el.style.transform = Z.s === 1 ? '' : `translate(${Z.x}px,${Z.y}px) scale(${Z.s})`;
+  $('zlbl').textContent = Z.s === 1 ? 'Fit' : (Z.s < 10 ? Z.s.toFixed(1) : Math.round(Z.s)) + '×';
+  $('views').classList.toggle('zoomed', Z.s > 1);
+}
+function zoomAt(factor, px, py){
+  const s2 = Math.min(32, Math.max(1, Z.s * factor));
+  Z.x = px - (px - Z.x) * (s2 / Z.s); Z.y = py - (py - Z.y) * (s2 / Z.s); Z.s = s2;
+  applyZ();
+}
+function resetZ(){ Z.s = 1; Z.x = Z.y = 0; applyZ(); }
+function localPoint(e, board){
+  const r = board.getBoundingClientRect();   // board's top-left = content's untransformed origin
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+$('zoomctl').onclick = e => {
+  const z = e.target.dataset.z; if (!z) return;
+  if (z === 'fit') return resetZ();
+  const b = boards()[0], el = b && b.firstElementChild; if (!el) return;
+  zoomAt(z === 'in' ? 2 : 0.5, el.offsetWidth / 2, el.offsetHeight / 2);
+};
+document.querySelectorAll('#views .board').forEach(board => {
+  board.addEventListener('wheel', e => {
+    e.preventDefault();
+    const [px, py] = localPoint(e, board);
+    zoomAt(Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0018)), px, py);
+  }, {passive:false});
+  board.addEventListener('dblclick', e => {
+    const [px, py] = localPoint(e, board);
+    if (Z.s > 1) resetZ(); else zoomAt(4, px, py);
+  });
+  let drag = null;
+  board.addEventListener('pointerdown', e => {
+    if (Z.s === 1) return;
+    drag = {x: e.clientX - Z.x, y: e.clientY - Z.y}; board.setPointerCapture(e.pointerId); board.classList.add('drag');
+  });
+  board.addEventListener('pointermove', e => { if (drag) { Z.x = e.clientX - drag.x; Z.y = e.clientY - drag.y; applyZ(); } });
+  const end = () => { drag = null; board.classList.remove('drag'); };
+  board.addEventListener('pointerup', end); board.addEventListener('pointercancel', end);
+});
+window.addEventListener('resize', applyZ);
 
 /* ---------- output ---------- */
 function download(it){
