@@ -54,7 +54,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .drop span{color:var(--muted);font-size:14px}
 .toolbar button{padding:7px 11px;font-size:14px}
 .toolbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
-.toolbar .stats{color:var(--muted);font-size:13px;margin-right:auto;display:flex;flex-wrap:wrap;gap:2px 10px;align-items:baseline}
+.toolbar .stats{color:var(--muted);font-size:13px;margin-right:auto;flex:1 1 200px;min-width:0;display:flex;flex-wrap:wrap;gap:2px 10px;align-items:baseline}
 .toolbar .stats b{color:var(--ink);font-weight:600}
 .toolbar .stats .warn{color:var(--accent);font-size:12px;flex-basis:100%}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
@@ -129,9 +129,8 @@ footer .ver{color:var(--ink);font-weight:600}
       <div class="ctl"><label>Detail <span id="v-detail"></span></label><input id="detail" type="range" min="0" max="100" step="1"><small>Keeps small specks and fine edges.</small></div>
       <div class="ctl"><label>Curves <span id="v-curves"></span></label><input id="curves" type="range" min="0" max="100" step="1"><small>Low = sharp corners, high = smooth curves.</small></div>
       <div class="ctl"><label>Blur before tracing <span id="v-blur"></span></label><input id="blur" type="range" min="0" max="5" step="1"><small>Cleans up noise in photos and JPGs.</small></div>
-      <div class="ctl"><label>Max working size <span id="v-maxsize"></span></label><input id="maxsize" type="range" min="200" max="2400" step="100"><small>Larger images are scaled down to trace faster.</small></div>
-      <label class="check"><input id="removeBg" type="checkbox"> Remove white background</label>
-      <label class="check"><input id="stroke" type="checkbox"> Outline shapes (hides hairline gaps)</label>
+      <div class="ctl"><label>Max working size <span id="v-maxsize"></span></label><input id="maxsize" type="range" min="400" max="4000" step="100"><small>Larger images are scaled down to trace faster.</small></div>
+      <label class="check"><input id="removeBg" type="checkbox"> Remove white background (around the edges)</label>
     </section>
   </aside>
 
@@ -160,7 +159,7 @@ footer .ver{color:var(--ink);font-weight:600}
     <div class="queue" id="queue"></div>
   </section>
 </main>
-<footer><b class="ver">Version 2.1</b> · Runs entirely in your browser — images are never uploaded. Tracing by <a href="https://github.com/jankovicsandras/imagetracerjs">imagetracerjs</a> (public domain).</footer>
+<footer><b class="ver">Version 2.2</b> · Runs entirely in your browser — images are never uploaded. Tracing by <a href="https://github.com/jankovicsandras/imagetracerjs">imagetracerjs</a> (public domain).</footer>
 <div class="toast" id="toast"></div>
 
 <script id="tracerLib">/*
@@ -1396,18 +1395,18 @@ $('themeBtn').onclick = () => {
 
 /* ---------- presets ---------- */
 const PRESETS = {
-  logo:         {colors:6,  detail:40, curves:55, blur:0, removeBg:false, stroke:true},
-  illustration: {colors:16, detail:60, curves:60, blur:1, removeBg:false, stroke:true},
-  photo:        {colors:48, detail:80, curves:70, blur:1, removeBg:false, stroke:true},
+  logo:         {colors:6,  detail:40, curves:55, blur:0, removeBg:false},
+  illustration: {colors:16, detail:60, curves:60, blur:1, removeBg:false},
+  photo:        {colors:48, detail:80, curves:70, blur:1, removeBg:false},
   lineart:      {colors:2,  detail:55, curves:65, blur:0, removeBg:true,  stroke:false},
-  poster:       {colors:5,  detail:20, curves:75, blur:3, removeBg:false, stroke:true},
-  pixel:        {colors:24, detail:100,curves:0,  blur:0, removeBg:false, stroke:true, pixel:true},
+  poster:       {colors:5,  detail:20, curves:75, blur:3, removeBg:false},
+  pixel:        {colors:24, detail:100,curves:0,  blur:0, removeBg:false, pixel:true},
 };
-const S = {preset:'logo', maxsize:1200, ...PRESETS.logo};
+const S = {preset:'logo', maxsize:2000, ...PRESETS.logo};
 
 function syncUI(){
   for (const k of ['colors','detail','curves','blur','maxsize']) { $(k).value = S[k]; }
-  $('removeBg').checked = S.removeBg; $('stroke').checked = S.stroke;
+  $('removeBg').checked = S.removeBg;
   $('v-colors').textContent = S.colors;
   $('v-detail').textContent = S.detail + '%';
   $('v-curves').textContent = S.curves + '%';
@@ -1427,7 +1426,7 @@ for (const k of ['colors','detail','curves','blur','maxsize']) {
     clearTimeout(tuneTimer); tuneTimer = setTimeout(retraceAll, 350);
   });
 }
-for (const k of ['removeBg','stroke']) $(k).onchange = () => { S[k] = $(k).checked; S.preset = null; syncUI(); retraceAll(); };
+for (const k of ['removeBg']) $(k).onchange = () => { S[k] = $(k).checked; S.preset = null; syncUI(); retraceAll(); };
 
 /* Map friendly sliders to imagetracer options */
 function tracerOptions(){
@@ -1443,7 +1442,7 @@ function tracerOptions(){
     rightangleenhance: c < 0.7,
     linefilter: c > 0.6,
     blurradius: S.blur, blurdelta: 20,
-    strokewidth: S.stroke ? 1 : 0,
+    strokewidth: 0,            // stacked layers can't leave gaps, so no outline needed
     roundcoords: 1, viewbox: true, desc: false, scale: 1,
   };
 }
@@ -1536,9 +1535,58 @@ function buildPalette(px, k){
    is traced as the union of its own pixels and every layer stacked above it.
    Layers overlap instead of touching, so any curve error just reveals the
    neighbouring band's color — no seams, at any Curves setting. */
+/* Green/blue-screen cleanup. Images cut out of a colored backdrop keep that
+   color in their soft edge pixels, which traces as a colored fringe. If the
+   hidden color under the transparent area is a strong single hue, pull that
+   hue out of the edge pixels (classic "despill") and give the lost brightness
+   back as neutral grey so glows stay white. */
+function despill(px, src, W, H){
+  let n = 0, s0 = 0, s1 = 0, s2 = 0;
+  for (let i = 0; i < src.length; i += 4) if (src[i+3] === 0) { n++; s0 += src[i]; s1 += src[i+1]; s2 += src[i+2]; }
+  if (n < W * H * 0.02) return false;
+  const k = [s0/n, s1/n, s2/n], ch = k.indexOf(Math.max(...k)), o = [0,1,2].filter(c => c !== ch);
+  if (k[ch] - Math.max(k[o[0]], k[o[1]]) < 60) return false;      // backdrop isn't a strong key color
+  const LW = [0.2126, 0.7152, 0.0722][ch];
+  // edge zone: semi-transparent pixels plus 2 px into the solid area
+  const edge = new Uint8Array(W * H), tmp = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) edge[i] = src[i*4+3] < 255 ? 1 : 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let v = 0; for (let d = -2; d <= 2 && !v; d++) { const xx = x + d; if (xx >= 0 && xx < W && edge[y*W+xx]) v = 1; } tmp[y*W+x] = v;
+  }
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let v = 0; for (let d = -2; d <= 2 && !v; d++) { const yy = y + d; if (yy >= 0 && yy < H && tmp[yy*W+x]) v = 1; } edge[y*W+x] = v;
+  }
+  for (let i = 0; i < W * H; i++) {
+    if (!edge[i] || px[i*4+3] === 0) continue;
+    const q = i * 4, s = px[q+ch] - Math.max(px[q+o[0]], px[q+o[1]]);
+    if (s <= 0) continue;
+    const add = s * LW;
+    px[q+ch] -= s; px[q] += add; px[q+1] += add; px[q+2] += add;   // Uint8ClampedArray clamps
+  }
+  return true;
+}
+
+const ALPHA_EDGES = [13, 64, 128, 191, 243], ALPHA_LEVELS = [0.15, 0.37, 0.63, 0.87, 1];
 function runTrace(imgd, opts){
   const IT = ImageTracer;
   opts = IT.checkoptions(opts);
+  const W = imgd.width, H = imgd.height, src = imgd.data;
+
+  // Soft transparency: if the image has real semi-transparent areas (glows,
+  // shadows, anti-aliased cut-outs), trace color for everything that's even
+  // faintly visible, and trace the alpha separately as a stepped opacity mask.
+  let transp = 0, partial = 0;
+  for (let i = 3; i < src.length; i += 4) { const a = src[i]; if (a < 13) transp++; else if (a < 243) partial++; }
+  const soft = partial > 200 && partial > (W * H - transp) * 0.003;
+  const cut = soft ? 13 : 128;
+  const px = new Uint8ClampedArray(src);
+  for (let i = 3; i < px.length; i += 4) px[i] = src[i] >= cut ? 255 : 0;
+  if (transp) despill(px, src, W, H);
+  // invisible pixels must match the transparent palette entry, whatever
+  // color happens to be hidden under them
+  for (let i = 0; i < px.length; i += 4) if (px[i+3] === 0) px[i] = px[i+1] = px[i+2] = 0;
+  imgd = {width: W, height: H, data: px};
+
   if (opts.smartPalette && !opts.pal) { opts.pal = buildPalette(imgd.data, opts.numberofcolors); opts.colorquantcycles = 1; }
   const ii = IT.colorquantization(imgd, opts);          // indexed pixels (with a -1 border)
   const P = ii.palette, arr = ii.array, ah = arr.length, aw = arr[0].length;
@@ -1570,10 +1618,32 @@ function runTrace(imgd, opts){
       opts.ltres, opts.qtres);
     if (traced.length) { layers.push(traced); palette.push(P[order[k]]); }
   }
-  return IT.getsvgstring({layers, palette, width: aw - 2, height: ah - 2}, opts);
+  let svg = IT.getsvgstring({layers, palette, width: aw - 2, height: ah - 2}, opts);
+
+  if (soft) {
+    // stacked alpha bands; each band's opacity is chosen so that, painted
+    // over the bands below it, the total equals that band's alpha level
+    const mlayers = [], mpal = [];
+    let prev = 0;
+    for (let k = 0; k < ALPHA_EDGES.length; k++) {
+      for (let j = 0; j < ah; j++) {
+        const mr = mask[j];
+        for (let i = 0; i < aw; i++) mr[i] = (j > 0 && i > 0 && j < ah - 1 && i < aw - 1 && src[((j-1)*W + (i-1))*4 + 3] >= ALPHA_EDGES[k]) ? 1 : 0;
+      }
+      const traced = IT.batchtracepaths(
+        IT.internodes(IT.pathscan(IT.layeringstep({array: mask}, 1), opts.pathomit), opts),
+        opts.ltres, opts.qtres);
+      const L = ALPHA_LEVELS[k], op = (L - prev) / (1 - prev);
+      prev = L;
+      if (traced.length) { mlayers.push(traced); mpal.push({r:255, g:255, b:255, a: Math.max(1, Math.round(op * 255))}); }
+    }
+    svg += '<!--ALPHA-->' + IT.getsvgstring({layers: mlayers, palette: mpal, width: aw - 2, height: ah - 2}, opts);
+  }
+  return svg;
 }
 
-const workerSrc = $('tracerLib').textContent + '\n' + buildPalette.toString() + '\n' + runTrace.toString() + `
+const workerSrc = $('tracerLib').textContent + '\n' + buildPalette.toString() + '\n' + despill.toString() +
+  '\nconst ALPHA_EDGES = ' + JSON.stringify(ALPHA_EDGES) + ', ALPHA_LEVELS = ' + JSON.stringify(ALPHA_LEVELS) + ';\n' + runTrace.toString() + `
 self.onmessage = e => {
   const {id, imgd, opts} = e.data;
   try { self.postMessage({id, svg: runTrace(imgd, opts)}); }
@@ -1669,7 +1739,21 @@ function pixels(it){
   cx.drawImage(it.img, 0, 0, tw, th);
   const d = cx.getImageData(0, 0, tw, th);
   const p = d.data;
-  if (S.removeBg) for (let i = 0; i < p.length; i += 4) if (p[i] > 235 && p[i+1] > 235 && p[i+2] > 235) p[i+3] = 0;
+  if (S.removeBg) {
+    // flood-fill from the edges: only white that's connected to the border is
+    // background — white highlights inside the artwork are kept
+    const isW = i => p[i*4+3] > 0 && p[i*4] > 235 && p[i*4+1] > 235 && p[i*4+2] > 235;
+    const seen = new Uint8Array(tw * th), st = [];
+    const push = i => { if (!seen[i] && isW(i)) { seen[i] = 1; st.push(i); } };
+    for (let x = 0; x < tw; x++) { push(x); push((th - 1) * tw + x); }
+    for (let y = 0; y < th; y++) { push(y * tw); push(y * tw + tw - 1); }
+    while (st.length) {
+      const i = st.pop(), x = i % tw;
+      p[i*4+3] = 0;
+      if (x > 0) push(i - 1); if (x < tw - 1) push(i + 1);
+      if (i >= tw) push(i - tw); if (i < (th - 1) * tw) push(i + tw);
+    }
+  }
   it.hasAlpha = false;
   for (let i = 3; i < p.length; i += 4) if (p[i] < 250) { it.hasAlpha = true; break; }
   return d;
@@ -1683,16 +1767,25 @@ function pixels(it){
    - invisible (fully transparent) shapes dropped
    Also scales the drawing back up to the original pixel size. */
 const hex = n => n.toString(16).padStart(2, '0');
-function cleanSVG(svg, it){
+function cleanSVG(svgAll, it){
+  const [svg, alphaSvg] = svgAll.split('<!--ALPHA-->');
   const vb = (svg.match(/viewBox="([^"]+)"/) || [])[1] || `0 0 ${it.w} ${it.h}`;
   const re = /<path fill="rgb\((\d+),(\d+),(\d+)\)" stroke="[^"]*" stroke-width="([\d.]+)" opacity="([\d.]+)" d="([^"]*)"\s*\/>/g;
-  const groups = []; let last = null, shapes = 0, m;
+  const tight = d => d.trim().replace(/\s*([MLQZ])\s*/g, '$1');
+  let maskBody = '', m;
+  if (alphaSvg) {
+    let lastOp = null, ds = [];
+    const flush = () => { if (ds.length) maskBody += `<path fill="#fff"` + (lastOp < 1 ? ` fill-opacity="${+lastOp.toFixed(3)}"` : '') + ` d="${ds.join('')}"/>`; ds = []; };
+    while ((m = re.exec(alphaSvg))) { const op = +m[5]; if (op !== lastOp) { flush(); lastOp = op; } ds.push(tight(m[6])); }
+    flush(); re.lastIndex = 0;
+  }
+  const groups = []; let last = null, shapes = 0;
   while ((m = re.exec(svg))) {
     const op = +m[5]; if (op === 0) continue;
     const col = '#' + hex(+m[1]) + hex(+m[2]) + hex(+m[3]);
     const key = col + '|' + m[4] + '|' + op;
     if (!last || last.key !== key) { last = {key, col, sw: +m[4], op, d: []}; groups.push(last); }
-    last.d.push(m[6].trim().replace(/\s*([MLQZ])\s*/g, '$1'));
+    last.d.push(tight(m[6]));
     shapes++;
   }
   let body = '';
@@ -1701,6 +1794,11 @@ function cleanSVG(svg, it){
             (g.op < 1 ? ` opacity="${+g.op.toFixed(3)}"` : '') + ` d="${g.d.join('')}"/>`;
   }
   it.shapes = shapes;
+  it.softAlpha = !!maskBody;
+  if (maskBody) {
+    const [vx, vy, vw, vh] = vb.split(/[\s,]+/);
+    body = `<defs><mask id="soft" maskUnits="userSpaceOnUse" x="${vx}" y="${vy}" width="${vw}" height="${vh}">${maskBody}</mask></defs><g mask="url(#soft)">${body}</g>`;
+  }
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${it.w}" height="${it.h}" viewBox="${vb}">${body}</svg>`;
 }
 
@@ -1753,7 +1851,7 @@ function showCurrent(){
   $('vecBoard').innerHTML = it.svg; applyZ();
   const kb = new Blob([it.svg]).size / 1024;
   const size = kb < 1 ? '<1 KB' : kb < 1024 ? kb.toFixed(0) + ' KB' : (kb/1024).toFixed(1) + ' MB';
-  const secs = it.ms ? ` · ${(it.ms/1000).toFixed(1)} s` : '';
+  const secs = (it.ms ? ` · ${(it.ms/1000).toFixed(1)} s` : '') + (it.softAlpha ? ' · soft transparency' : '');
   $('stats').innerHTML = `${it.w}×${it.h} · ${(it.shapes||0).toLocaleString()} shapes · <b>${size}</b>${secs}` +
     (kb > 5120 ? `<span class="warn">Big file: lower Detail or Colors, or raise Blur, to shrink it.</span>` : '');
 }
